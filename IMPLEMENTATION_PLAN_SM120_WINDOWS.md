@@ -10,18 +10,18 @@
 ## Assumptions & environment
 
 - You’ll **fork** `Dao-AILab/flash-attention` and work on a feature branch.  
-- **No heavy build** runs in the cloud agent: we only do **syntax/lint checks** and text‑level validation.  
+- **No heavy build** runs in the cloud agent: we do **syntax/lint checks** and text‑level validation, compilation and tests where possible.  
 - **Local build** (after agent is done): Windows 10/11, CUDA **12.8+**, **MSVC 2022**, **Ninja** generator.
 - This plan edits only the FA‑3 Hopper subtree (`hopper/…`) and doc/scripts.
-
+- We need to be able to run a build for a minimal number of architectures, meaning we should be able to build FA-3 for SM120 only, not all the SM80 and SM90 archs.
 ---
 
 ## Deliverables (what should exist after the agent finishes)
 
 1. **New SM120 kernels** (forward + backward) under `hopper/instantiations/*sm120*.cu` with **CUTLASS SM120** collectives.  
 2. **Launch template gating** added for SM120 (`__CUDA_ARCH__ >= 1200`).  
-3. **Windows+Ninja** build support added.  
-4. **Lint/syntax‑only** scripts to validate C++/CUDA.  
+3. **Windows+Ninja** build support maintained.  
+4. **Lint/syntax‑only** scripts to validate C++/CUDA. Validate references to any Cutlass/CUDA resources are valid. 
 5. **Docs** for Windows build.  
 6. **Optional CI lint workflow**.
 
@@ -113,6 +113,7 @@ Add:
 - `hopper/instantiations/flash_fwd_hdim128_bf16_sm120.cu`
 
 Include mainloop header + traits.
+Update generate_kernels.py to provide these.
 
 ---
 
@@ -131,7 +132,7 @@ Add:
 
 - `hopper/instantiations/flash_bwd_hdim64_fp16_sm120.cu`  
 - `hopper/instantiations/flash_bwd_hdim128_bf16_sm120.cu`
-
+Update generate_kernels.py to provide these.
 ---
 
 ### Task 10 — Runtime dispatch
@@ -180,6 +181,7 @@ Create:
 - `tools/lint/check_includes.py`: validate includes.  
 - `tools/lint/grep_arch_flags.py`: check sm_120 flags.
 
+Use linting tools to validate changes. If linting fails, resolve issues then re-run until successful.
 ---
 
 ### Task 13 — Optional CI lint workflow
@@ -204,7 +206,7 @@ Update docs:
 
 ### Task 15 — Add extra head dims
 
-Add instantiations for:
+Add instantiations for the following, including updating generate kernels:
 
 - hdim 96  
 - hdim 160
