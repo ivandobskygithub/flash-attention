@@ -37,6 +37,26 @@ class ValidationStage:
     runner: Callable[[], str]
 
 
+@dataclass
+class SmokeTestConfig:
+    batch: int
+    seqlen: int
+    heads: int
+    headdim: int
+    dtype: torch.dtype
+    causal: bool
+
+
+SMOKE_TEST_CONFIG = SmokeTestConfig(
+    batch=1,
+    seqlen=16,
+    heads=2,
+    headdim=64,
+    dtype=torch.float16,
+    causal=False,
+)
+
+
 def ensure_torch_version() -> str:
     version = torch.__version__
     if version != EXPECTED_TORCH_VERSION:
@@ -111,31 +131,54 @@ def describe_flash_attn3_build() -> str:
 
 def run_flash_attn3_smoke_test() -> str:
     device = torch.device("cuda")
-    batch, seqlen, nheads, headdim = 1, 16, 2, 64
+    batch = SMOKE_TEST_CONFIG.batch
+    seqlen = SMOKE_TEST_CONFIG.seqlen
+    nheads = SMOKE_TEST_CONFIG.heads
+    headdim = SMOKE_TEST_CONFIG.headdim
+    causal = SMOKE_TEST_CONFIG.causal
+    dtype = SMOKE_TEST_CONFIG.dtype
 
     q = torch.randn(
-        batch, seqlen, nheads, headdim, device=device, dtype=torch.float16, requires_grad=True
+        batch, seqlen, nheads, headdim, device=device, dtype=dtype, requires_grad=True
     )
     k = torch.randn_like(q)
     v = torch.randn_like(q)
 
+    def _format_tensor(tensor: torch.Tensor, name: str) -> str:
+        return (
+            f"- {name}: shape={tuple(tensor.shape)}, stride={tuple(tensor.stride())}, "
+            f"dtype={tensor.dtype}, contiguous={tensor.is_contiguous()}"
+        )
+
     try:
-        out, softmax_lse = flash_attn_func(q, k, v, return_attn_probs=True)
+        out, softmax_lse = flash_attn_func(
+            q, k, v, return_attn_probs=True, causal=causal
+        )
         _ = softmax_lse  # Returned for visibility in case debugging is needed.
         loss = out.sum()
         loss.backward()
+        torch.cuda.synchronize()
     except Exception as exc:  # noqa: BLE001
         torch.cuda.synchronize()
         props = torch.cuda.get_device_properties(device)
+        stream = torch.cuda.current_stream(device)
         raise RuntimeError(
             "FlashAttention-3 forward/backward failed. Diagnostics:\n"
             f"- Device: {props.name} (cc {props.major}.{props.minor})\n"
             f"- torch.__version__: {torch.__version__}\n"
             f"- torch.version.cuda: {torch.version.cuda}\n"
-            f"- TORCH_CUDA_ARCH_LIST: {os.environ.get('TORCH_CUDA_ARCH_LIST', '<unset>')}\n"
+            f"- CUDA_LAUNCH_BLOCKING: {os.environ.get('CUDA_LAUNCH_BLOCKING', '<unset>')}\n"
             f"- torch.cuda.get_arch_list(): {torch.cuda.get_arch_list()}\n"
             f"- flash_attn_3 module: {getattr(importlib.import_module('flash_attn_3'), '__file__', '<not found>')}\n"
-            f"- flash_attn_3._C extension: {getattr(importlib.import_module('flash_attn_3._C'), '__file__', '<not found>')}"
+            f"- flash_attn_3._C extension: {getattr(importlib.import_module('flash_attn_3._C'), '__file__', '<not found>')}\n"
+            f"- Current stream: {stream}\n"
+            f"- Current device: {torch.cuda.current_device()}\n"
+            f"- smoke_test config: batch={batch}, seqlen={seqlen}, heads={nheads}, headdim={headdim}, "
+            f"dtype={dtype}, causal={causal}\n"
+            f"{_format_tensor(q, 'Q')}\n"
+            f"{_format_tensor(k, 'K')}\n"
+            f"{_format_tensor(v, 'V')}\n"
+            f"- torch.backends.cuda.matmul.allow_tf32={torch.backends.cuda.matmul.allow_tf32}"
         ) from exc
 
     max_out = out.abs().max().item()
@@ -243,11 +286,68 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         action="store_true",
         help="Print full tracebacks for failing stages to aid debugging.",
     )
+    parser.add_argument(
+        "--launch-blocking",
+        action="store_true",
+        help="Force CUDA_LAUNCH_BLOCKING=1 to pin errors to the failing kernel.",
+    )
+    parser.add_argument(
+        "--smoke-seqlen",
+        type=int,
+        default=16,
+        help="Sequence length for the smoke test (default: 16).",
+    )
+    parser.add_argument(
+        "--smoke-heads",
+        type=int,
+        default=2,
+        help="Number of attention heads for the smoke test (default: 2).",
+    )
+    parser.add_argument(
+        "--smoke-headdim",
+        type=int,
+        default=64,
+        help="Head dimension for the smoke test (default: 64).",
+    )
+    parser.add_argument(
+        "--smoke-dtype",
+        choices=["fp16", "bf16"],
+        default="fp16",
+        help="Data type for the smoke test tensors (default: fp16).",
+    )
+    parser.add_argument(
+        "--smoke-causal",
+        action="store_true",
+        help="Run the smoke test with causal=True to exercise that path.",
+    )
+    parser.add_argument(
+        "--sync-debug-mode",
+        type=int,
+        choices=[0, 1, 2],
+        default=None,
+        help=(
+            "Set torch.cuda.set_sync_debug_mode for additional CUDA diagnostics (0=off, 1=warn, 2=error). "
+            "Defaults to leaving the current setting untouched."
+        ),
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: Sequence[str] | None = None) -> None:
     args = parse_args([] if argv is None else argv)
+    global SMOKE_TEST_CONFIG
+    SMOKE_TEST_CONFIG = SmokeTestConfig(
+        batch=1,
+        seqlen=args.smoke_seqlen,
+        heads=args.smoke_heads,
+        headdim=args.smoke_headdim,
+        dtype=torch.bfloat16 if args.smoke_dtype == "bf16" else torch.float16,
+        causal=args.smoke_causal,
+    )
+    if args.launch_blocking:
+        os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
+    if args.sync_debug_mode is not None:
+        torch.cuda.set_sync_debug_mode(args.sync_debug_mode)
     stages = build_stages()
     results = run_stages(
         stages,
