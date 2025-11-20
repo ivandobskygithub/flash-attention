@@ -11,6 +11,7 @@
 #include <cutlass/kernel_hardware_info.h>
 #include "cutlass/cluster_launch.hpp"
 #include "cutlass/kernel_launch.h"
+#include <cstdio>
 
 #include "static_switch.h"
 #include "flash.h"
@@ -190,6 +191,17 @@ void run_flash_fwd(Flash_fwd_params &params, cudaStream_t stream) {
     dim3 grid_dims = AttnKernel::get_grid_shape(kernel_params);
     dim3 block_dims = AttnKernel::get_block_shape();
     int smem_size = AttnKernel::SharedStorageSize;
+    int smem_limit_optin = 0;
+    int smem_limit = 0;
+    CHECK_CUDA(cudaDeviceGetAttribute(&smem_limit_optin, cudaDevAttrMaxSharedMemoryPerBlockOptin, device));
+    CHECK_CUDA(cudaDeviceGetAttribute(&smem_limit, cudaDevAttrMaxSharedMemoryPerBlock, device));
+    int smem_cap = smem_limit_optin > 0 ? smem_limit_optin : smem_limit;
+    if (smem_cap > 0 && smem_size > smem_cap) {
+        fprintf(stderr,
+                "FlashAttention forward launch requires %dB shared memory, exceeding device limit %dB (device %d).\n",
+                smem_size, smem_cap, device);
+        exit(1);
+    }
     // int smem_size_q = sizeof(decltype((typename CollectiveMainloop::TensorStorage{}).smem_q));
     // int smem_size_k = sizeof(decltype((typename CollectiveMainloop::TensorStorage{}).smem_k));
     // int smem_size_v = sizeof(decltype((typename CollectiveMainloop::TensorStorage{}).smem_v));
