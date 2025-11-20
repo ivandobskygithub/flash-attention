@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import os
+import traceback
 from dataclasses import dataclass
 from typing import Callable, List, Sequence
 
@@ -33,6 +35,26 @@ class ValidationStage:
     name: str
     description: str
     runner: Callable[[], str]
+
+
+@dataclass
+class SmokeTestConfig:
+    batch: int
+    seqlen: int
+    heads: int
+    headdim: int
+    dtype: torch.dtype
+    causal: bool
+
+
+SMOKE_TEST_CONFIG = SmokeTestConfig(
+    batch=1,
+    seqlen=16,
+    heads=2,
+    headdim=64,
+    dtype=torch.float16,
+    causal=False,
+)
 
 
 def ensure_torch_version() -> str:
@@ -92,20 +114,72 @@ def ensure_flash_attn3_ops() -> str:
     return "FlashAttention-3 operators are registered with torch.ops."
 
 
+def describe_flash_attn3_build() -> str:
+    flash_attn3 = importlib.import_module("flash_attn_3")
+    flash_attn3_ext = importlib.import_module("flash_attn_3._C")
+
+    version = getattr(flash_attn3, "__version__", "unknown")
+    module_path = getattr(flash_attn3, "__file__", "<not found>")
+    ext_path = getattr(flash_attn3_ext, "__file__", "<not found>")
+    env_arch = os.environ.get("TORCH_CUDA_ARCH_LIST", "<unset>")
+
+    return (
+        f"flash_attn_3 version={version} (py={module_path}, ext={ext_path}); "
+        f"TORCH_CUDA_ARCH_LIST={env_arch}; torch.cuda.get_arch_list()={torch.cuda.get_arch_list()}"
+    )
+
+
 def run_flash_attn3_smoke_test() -> str:
     device = torch.device("cuda")
-    batch, seqlen, nheads, headdim = 1, 16, 2, 64
+    batch = SMOKE_TEST_CONFIG.batch
+    seqlen = SMOKE_TEST_CONFIG.seqlen
+    nheads = SMOKE_TEST_CONFIG.heads
+    headdim = SMOKE_TEST_CONFIG.headdim
+    causal = SMOKE_TEST_CONFIG.causal
+    dtype = SMOKE_TEST_CONFIG.dtype
 
     q = torch.randn(
-        batch, seqlen, nheads, headdim, device=device, dtype=torch.float16, requires_grad=True
+        batch, seqlen, nheads, headdim, device=device, dtype=dtype, requires_grad=True
     )
     k = torch.randn_like(q)
     v = torch.randn_like(q)
 
-    out, softmax_lse = flash_attn_func(q, k, v, return_attn_probs=True)
-    _ = softmax_lse  # Returned for visibility in case debugging is needed.
-    loss = out.sum()
-    loss.backward()
+    def _format_tensor(tensor: torch.Tensor, name: str) -> str:
+        return (
+            f"- {name}: shape={tuple(tensor.shape)}, stride={tuple(tensor.stride())}, "
+            f"dtype={tensor.dtype}, contiguous={tensor.is_contiguous()}"
+        )
+
+    try:
+        out, softmax_lse = flash_attn_func(
+            q, k, v, return_attn_probs=True, causal=causal
+        )
+        _ = softmax_lse  # Returned for visibility in case debugging is needed.
+        loss = out.sum()
+        loss.backward()
+        torch.cuda.synchronize()
+    except Exception as exc:  # noqa: BLE001
+        torch.cuda.synchronize()
+        props = torch.cuda.get_device_properties(device)
+        stream = torch.cuda.current_stream(device)
+        raise RuntimeError(
+            "FlashAttention-3 forward/backward failed. Diagnostics:\n"
+            f"- Device: {props.name} (cc {props.major}.{props.minor})\n"
+            f"- torch.__version__: {torch.__version__}\n"
+            f"- torch.version.cuda: {torch.version.cuda}\n"
+            f"- CUDA_LAUNCH_BLOCKING: {os.environ.get('CUDA_LAUNCH_BLOCKING', '<unset>')}\n"
+            f"- torch.cuda.get_arch_list(): {torch.cuda.get_arch_list()}\n"
+            f"- flash_attn_3 module: {getattr(importlib.import_module('flash_attn_3'), '__file__', '<not found>')}\n"
+            f"- flash_attn_3._C extension: {getattr(importlib.import_module('flash_attn_3._C'), '__file__', '<not found>')}\n"
+            f"- Current stream: {stream}\n"
+            f"- Current device: {torch.cuda.current_device()}\n"
+            f"- smoke_test config: batch={batch}, seqlen={seqlen}, heads={nheads}, headdim={headdim}, "
+            f"dtype={dtype}, causal={causal}\n"
+            f"{_format_tensor(q, 'Q')}\n"
+            f"{_format_tensor(k, 'K')}\n"
+            f"{_format_tensor(v, 'V')}\n"
+            f"- torch.backends.cuda.matmul.allow_tf32={torch.backends.cuda.matmul.allow_tf32}"
+        ) from exc
 
     max_out = out.abs().max().item()
     max_grad = q.grad.abs().max().item()
@@ -138,6 +212,11 @@ def build_stages() -> List[ValidationStage]:
             runner=ensure_flash_attn3_ops,
         ),
         ValidationStage(
+            name="flash-attn3-build-info",
+            description="Report FlashAttention-3 Python/CUDA artifact locations and arch flags.",
+            runner=describe_flash_attn3_build,
+        ),
+        ValidationStage(
             name="flash-attn3-smoke-test",
             description="Run a minimal FlashAttention-3 forward/backward on CUDA.",
             runner=run_flash_attn3_smoke_test,
@@ -150,6 +229,7 @@ def run_stages(
     *,
     max_stage: int | None,
     stop_on_failure: bool,
+    print_traceback: bool,
 ) -> List[StageResult]:
     results: List[StageResult] = []
     selected = stages if max_stage is None else stages[:max_stage]
@@ -163,6 +243,8 @@ def run_stages(
         except Exception as exc:  # noqa: BLE001
             details = str(exc)
             print(f"  FAIL: {details}")
+            if print_traceback:
+                traceback.print_exc()
             results.append(StageResult(stage.name, False, details))
             if stop_on_failure:
                 break
@@ -199,13 +281,84 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         action="store_true",
         help="Stop after the first failing stage instead of continuing.",
     )
+    parser.add_argument(
+        "--traceback",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Print full tracebacks for failing stages to aid debugging (default: on).",
+    )
+    parser.add_argument(
+        "--launch-blocking",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Force CUDA_LAUNCH_BLOCKING=1 to pin errors to the failing kernel (default: on).",
+    )
+    parser.add_argument(
+        "--smoke-seqlen",
+        type=int,
+        default=16,
+        help="Sequence length for the smoke test (default: 16).",
+    )
+    parser.add_argument(
+        "--smoke-heads",
+        type=int,
+        default=2,
+        help="Number of attention heads for the smoke test (default: 2).",
+    )
+    parser.add_argument(
+        "--smoke-headdim",
+        type=int,
+        default=64,
+        help="Head dimension for the smoke test (default: 64).",
+    )
+    parser.add_argument(
+        "--smoke-dtype",
+        choices=["fp16", "bf16"],
+        default="fp16",
+        help="Data type for the smoke test tensors (default: fp16).",
+    )
+    parser.add_argument(
+        "--smoke-causal",
+        action="store_true",
+        help="Run the smoke test with causal=True to exercise that path.",
+    )
+    parser.add_argument(
+        "--sync-debug-mode",
+        type=int,
+        choices=[0, 1, 2],
+        default=2,
+        help=(
+            "Set torch.cuda.set_sync_debug_mode for additional CUDA diagnostics (0=off, 1=warn, 2=error). "
+            "Defaults to 2 for maximal diagnostics."
+        ),
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: Sequence[str] | None = None) -> None:
     args = parse_args([] if argv is None else argv)
+    global SMOKE_TEST_CONFIG
+    SMOKE_TEST_CONFIG = SmokeTestConfig(
+        batch=1,
+        seqlen=args.smoke_seqlen,
+        heads=args.smoke_heads,
+        headdim=args.smoke_headdim,
+        dtype=torch.bfloat16 if args.smoke_dtype == "bf16" else torch.float16,
+        causal=args.smoke_causal,
+    )
+    if args.launch_blocking:
+        os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
+    else:
+        os.environ.pop("CUDA_LAUNCH_BLOCKING", None)
+    if args.sync_debug_mode is not None:
+        torch.cuda.set_sync_debug_mode(args.sync_debug_mode)
     stages = build_stages()
-    results = run_stages(stages, max_stage=args.max_stage, stop_on_failure=args.stop_on_failure)
+    results = run_stages(
+        stages,
+        max_stage=args.max_stage,
+        stop_on_failure=args.stop_on_failure,
+        print_traceback=args.traceback,
+    )
     summarize_results(results)
 
 
