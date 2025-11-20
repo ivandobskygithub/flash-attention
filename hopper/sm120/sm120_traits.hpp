@@ -8,7 +8,9 @@ namespace flash::sm120 {
 
 #ifndef CUTLASS_ARCH_SM120_ENABLED
 namespace cutlass { namespace arch {
-struct Sm120 {};
+struct Sm120 {
+    static constexpr int kMinComputeCapability = 120;
+};
 }}  // namespace cutlass::arch
 #endif
 
