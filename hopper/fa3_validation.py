@@ -12,6 +12,7 @@ import argparse
 import importlib
 import os
 import traceback
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Callable, List, Sequence
 
@@ -47,6 +48,13 @@ class SmokeTestConfig:
     causal: bool
 
 
+@dataclass
+class DebugOptions:
+    detect_anomaly: bool
+    dump_memory_stats: bool
+    cuda_module_loading: str | None
+
+
 SMOKE_TEST_CONFIG = SmokeTestConfig(
     batch=1,
     seqlen=16,
@@ -54,6 +62,12 @@ SMOKE_TEST_CONFIG = SmokeTestConfig(
     headdim=64,
     dtype=torch.float16,
     causal=False,
+)
+
+DEBUG_OPTIONS = DebugOptions(
+    detect_anomaly=True,
+    dump_memory_stats=True,
+    cuda_module_loading="EAGER",
 )
 
 
@@ -150,24 +164,44 @@ def run_flash_attn3_smoke_test() -> str:
             f"dtype={tensor.dtype}, contiguous={tensor.is_contiguous()}"
         )
 
+    metadata = "<unavailable>"
     try:
-        out, softmax_lse = flash_attn_func(
-            q, k, v, return_attn_probs=True, causal=causal
-        )
-        _ = softmax_lse  # Returned for visibility in case debugging is needed.
-        loss = out.sum()
-        loss.backward()
-        torch.cuda.synchronize()
+        metadata = torch.ops.flash_attn_3.get_scheduler_metadata()
+    except Exception as metadata_exc:  # noqa: BLE001
+        metadata = f"<unavailable: {metadata_exc}>"
+
+    anomaly_ctx = (
+        torch.autograd.detect_anomaly()
+        if DEBUG_OPTIONS.detect_anomaly
+        else nullcontext()
+    )
+
+    try:
+        with anomaly_ctx:
+            out, softmax_lse = flash_attn_func(
+                q, k, v, return_attn_probs=True, causal=causal
+            )
+            _ = softmax_lse  # Returned for visibility in case debugging is needed.
+            loss = out.sum()
+            loss.backward()
+            torch.cuda.synchronize()
     except Exception as exc:  # noqa: BLE001
         torch.cuda.synchronize()
         props = torch.cuda.get_device_properties(device)
         stream = torch.cuda.current_stream(device)
+        memory_dump = None
+        if DEBUG_OPTIONS.dump_memory_stats:
+            try:
+                memory_dump = torch.cuda.memory_summary(device=device, abbreviated=True)
+            except Exception as mem_exc:  # noqa: BLE001
+                memory_dump = f"<unavailable: {mem_exc}>"
         raise RuntimeError(
             "FlashAttention-3 forward/backward failed. Diagnostics:\n"
             f"- Device: {props.name} (cc {props.major}.{props.minor})\n"
             f"- torch.__version__: {torch.__version__}\n"
             f"- torch.version.cuda: {torch.version.cuda}\n"
             f"- CUDA_LAUNCH_BLOCKING: {os.environ.get('CUDA_LAUNCH_BLOCKING', '<unset>')}\n"
+            f"- CUDA_MODULE_LOADING: {os.environ.get('CUDA_MODULE_LOADING', '<unset>')}\n"
             f"- torch.cuda.get_arch_list(): {torch.cuda.get_arch_list()}\n"
             f"- flash_attn_3 module: {getattr(importlib.import_module('flash_attn_3'), '__file__', '<not found>')}\n"
             f"- flash_attn_3._C extension: {getattr(importlib.import_module('flash_attn_3._C'), '__file__', '<not found>')}\n"
@@ -178,7 +212,14 @@ def run_flash_attn3_smoke_test() -> str:
             f"{_format_tensor(q, 'Q')}\n"
             f"{_format_tensor(k, 'K')}\n"
             f"{_format_tensor(v, 'V')}\n"
-            f"- torch.backends.cuda.matmul.allow_tf32={torch.backends.cuda.matmul.allow_tf32}"
+            f"- torch.backends.cuda.matmul.allow_tf32={torch.backends.cuda.matmul.allow_tf32}\n"
+            f"- torch.backends.cuda.flash_sdp_enabled={torch.backends.cuda.flash_sdp_enabled()}\n"
+            f"- torch.backends.cuda.mem_efficient_sdp_enabled={torch.backends.cuda.mem_efficient_sdp_enabled()}\n"
+            f"- torch.backends.cuda.math_sdp_enabled={torch.backends.cuda.math_sdp_enabled()}\n"
+            f"- flash_attn_3.get_scheduler_metadata(): {metadata}\n"
+            f"- torch.autograd.detect_anomaly={'on' if DEBUG_OPTIONS.detect_anomaly else 'off'}\n"
+            f"- torch.cuda.set_sync_debug_mode={torch.cuda.get_sync_debug_mode()}\n"
+            f"- Memory summary:\n{memory_dump if memory_dump is not None else '<skipped>'}"
         ) from exc
 
     max_out = out.abs().max().item()
@@ -332,6 +373,30 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
             "Defaults to 2 for maximal diagnostics."
         ),
     )
+    parser.add_argument(
+        "--detect-anomaly",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable torch.autograd.detect_anomaly() during the smoke test (default: on).",
+    )
+    parser.add_argument(
+        "--dump-memory-stats",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Capture torch.cuda.memory_summary() when the smoke test fails (default: on). "
+            "Disable if the output is too verbose."
+        ),
+    )
+    parser.add_argument(
+        "--cuda-module-loading",
+        choices=["EAGER", "LAZY", "DEFAULT", "unset"],
+        default="EAGER",
+        help=(
+            "Set CUDA_MODULE_LOADING to influence module load behavior (default: EAGER for clearer load failures). "
+            "Use 'unset' to avoid setting the variable."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -346,10 +411,20 @@ def main(argv: Sequence[str] | None = None) -> None:
         dtype=torch.bfloat16 if args.smoke_dtype == "bf16" else torch.float16,
         causal=args.smoke_causal,
     )
+    global DEBUG_OPTIONS
+    DEBUG_OPTIONS = DebugOptions(
+        detect_anomaly=args.detect_anomaly,
+        dump_memory_stats=args.dump_memory_stats,
+        cuda_module_loading=(None if args.cuda_module_loading == "unset" else args.cuda_module_loading),
+    )
     if args.launch_blocking:
         os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
     else:
         os.environ.pop("CUDA_LAUNCH_BLOCKING", None)
+    if DEBUG_OPTIONS.cuda_module_loading is None:
+        os.environ.pop("CUDA_MODULE_LOADING", None)
+    else:
+        os.environ["CUDA_MODULE_LOADING"] = DEBUG_OPTIONS.cuda_module_loading
     if args.sync_debug_mode is not None:
         torch.cuda.set_sync_debug_mode(args.sync_debug_mode)
     stages = build_stages()
