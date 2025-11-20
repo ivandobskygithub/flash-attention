@@ -15,7 +15,7 @@ from typing import Callable, List, Sequence
 
 import torch
 
-from hopper.flash_attn_interface import flash_attn_func
+from flash_attn_interface import flash_attn_func
 
 EXPECTED_TORCH_VERSION = "2.9.0+cu128"
 MIN_COMPUTE_CAPABILITY = (12, 0)
