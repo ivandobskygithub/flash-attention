@@ -20,8 +20,20 @@
 #include "epilogue_bwd.hpp"
 #include "flash_bwd_kernel_sm90.h"
 #include "flash_bwd_kernel_sm80.h"
+#include "sm120/flash_bwd_mainloop_sm120.hpp"
+#include "sm120/sm120_traits.hpp"
 
 using namespace cute;
+
+#if defined(__CUDA_ARCH__)
+#if (__CUDA_ARCH__ >= 1200)
+// SM120 path
+#elif (__CUDA_ARCH__ >= 900)
+// SM90 path
+#else
+#error "FlashAttention-3: unsupported compute capability"
+#endif
+#endif
 
 template <int Arch, int kHeadDim, int kBlockM, int kBlockN, typename Element,
           bool Is_causal, bool Is_local, bool Has_softcap, bool Varlen, bool Deterministic, bool GQA,
@@ -32,7 +44,9 @@ template <int Arch, int kHeadDim, int kBlockM, int kBlockN, typename Element,
 void run_flash_bwd(Flash_bwd_params &params, cudaStream_t stream) {
     static_assert(!(Is_causal && Is_local), "Is_causal and Is_local cannot be true at the same time.");
     using ElementAccum = float;
-    using ArchTag = std::conditional_t<Arch >= 90, cutlass::arch::Sm90, cutlass::arch::Sm80>;
+    using ArchTag = std::conditional_t<Arch >= 120,
+        flash::sm120::Sm120Traits::ArchTag,
+        std::conditional_t<Arch >= 90, cutlass::arch::Sm90, cutlass::arch::Sm80>>;
 
     int const total_q_padded_rounded = cute::round_up(params.total_q + params.b * kBlockM, kBlockM);
     int const total_k_padded_rounded = cute::round_up(params.total_k + params.b * kBlockN, kBlockN);
@@ -80,14 +94,17 @@ void run_flash_bwd(Flash_bwd_params &params, cudaStream_t stream) {
     static constexpr int Stages = Arch >= 90 ? 2 : Stages_dS_or_QSm80;
     static constexpr int Stages_dS = Arch >= 90 ? Stages_dS_or_QSm80 : 1;
     using CollectiveMainloop = std::conditional_t<
-        Arch >= 90,
-        flash::CollectiveMainloopBwdSm90<Stages, Stages_dO, Stages_dS, ClusterShape, TileShape_MNK, Element, ElementAccum, cutlass::arch::Sm90,
-            Is_causal, Is_local, Has_softcap, Varlen, Deterministic,
-            SdP_swapAB, dKV_swapAB, dQ_swapAB, NumMmaWarpGroups, AtomLayoutMSdP, AtomLayoutNdKV, AtomLayoutMdQ, V_in_regs>,
-        flash::CollectiveMainloopBwdSm80<Stages, Stages_dO, TileShape_MNK, Element, ElementAccum, cutlass::arch::Sm80,
-            Is_causal, Is_local, Has_softcap, Varlen, Deterministic,
-            SdP_swapAB, dKV_swapAB, dQ_swapAB, NumMmaWarpGroups, AtomLayoutMSdP, AtomLayoutNdKV, AtomLayoutMdQ, V_in_regs>
-    >;
+        Arch >= 120,
+        flash::CollectiveMainloopBwdSm120<SdP_swapAB, TileShape_MNK, ClusterShape, Element, typename flash::sm120::Sm120Traits::ArchTag, Is_causal, Has_softcap>,
+        std::conditional_t<
+            Arch >= 90,
+            flash::CollectiveMainloopBwdSm90<Stages, Stages_dO, Stages_dS, ClusterShape, TileShape_MNK, Element, ElementAccum, cutlass::arch::Sm90,
+                Is_causal, Is_local, Has_softcap, Varlen, Deterministic,
+                SdP_swapAB, dKV_swapAB, dQ_swapAB, NumMmaWarpGroups, AtomLayoutMSdP, AtomLayoutNdKV, AtomLayoutMdQ, V_in_regs>,
+            flash::CollectiveMainloopBwdSm80<Stages, Stages_dO, TileShape_MNK, Element, ElementAccum, cutlass::arch::Sm80,
+                Is_causal, Is_local, Has_softcap, Varlen, Deterministic,
+                SdP_swapAB, dKV_swapAB, dQ_swapAB, NumMmaWarpGroups, AtomLayoutMSdP, AtomLayoutNdKV, AtomLayoutMdQ, V_in_regs>
+        >>;
     using CollectiveEpilogue = std::conditional_t<
         !GQA,
         flash::CollectiveEpilogueBwd<TileShape_MNK, Element, ArchTag, CollectiveMainloop::NumMmaThreads, Varlen, dKV_swapAB, NumMmaWarpGroups * (Arch >= 90 ? 1 : cutlass::NumWarpsPerWarpGroup) / AtomLayoutNdKV>,
@@ -360,6 +377,19 @@ void run_mha_bwd_hdim128(Flash_bwd_params &params, cudaStream_t stream) {
             run_mha_bwd_dispatch<Arch, T, 64, 96, 128, Is_causal, Is_local, Has_softcap, 1, 2, false, false, false, 2, 2, 2, 2, true>(params, stream);
         } else {
             run_mha_bwd_dispatch<Arch, T, 64, 128, 128, Is_causal, Is_local, Has_softcap, 2, 2, false, false, false, 2, 2, 2, 2, false>(params, stream);
+        }
+    });
+}
+
+template<int Arch, typename T, bool Has_softcap>
+void run_mha_bwd_hdim160(Flash_bwd_params &params, cudaStream_t stream) {
+    CAUSAL_LOCAL_SWITCH(params.is_causal, params.is_local, Is_causal, Is_local, [&] {
+        if constexpr (Arch >= 90) {
+            run_mha_bwd_dispatch<Arch, T, 64, 128, 160, Is_causal, Is_local, Has_softcap, 2, 2, true, false, false, 2, 1, 2, 1, false>(params, stream);
+        } else if constexpr (Arch == 86 || Arch == 89) {
+            run_mha_bwd_dispatch<Arch, T, 64, 128, 160, Is_causal, Is_local, Has_softcap, 1, 2, false, false, false, 2, 2, 4, 2, true>(params, stream);
+        } else {
+            run_mha_bwd_dispatch<Arch, T, 64, 128, 160, Is_causal, Is_local, Has_softcap, 2, 2, false, false, false, 2, 2, 4, 2, false>(params, stream);
         }
     });
 }

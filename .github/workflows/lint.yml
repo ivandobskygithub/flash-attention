@@ -1,0 +1,27 @@
+name: lint
+
+on:
+  pull_request:
+  push:
+    branches: ["feature/fa3-sm120-windows"]
+
+jobs:
+  lint:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install lint deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r tools/lint/requirements.txt
+      - name: Run lint scripts
+        shell: pwsh
+        run: |
+          python tools/lint/check_tokens.py
+          python tools/lint/check_includes.py
+          python tools/lint/grep_arch_flags.py
+          ./tools/lint/run_all.ps1
