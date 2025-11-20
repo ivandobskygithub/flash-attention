@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import os
+import traceback
 from dataclasses import dataclass
 from typing import Callable, List, Sequence
 
@@ -92,6 +94,21 @@ def ensure_flash_attn3_ops() -> str:
     return "FlashAttention-3 operators are registered with torch.ops."
 
 
+def describe_flash_attn3_build() -> str:
+    flash_attn3 = importlib.import_module("flash_attn_3")
+    flash_attn3_ext = importlib.import_module("flash_attn_3._C")
+
+    version = getattr(flash_attn3, "__version__", "unknown")
+    module_path = getattr(flash_attn3, "__file__", "<not found>")
+    ext_path = getattr(flash_attn3_ext, "__file__", "<not found>")
+    env_arch = os.environ.get("TORCH_CUDA_ARCH_LIST", "<unset>")
+
+    return (
+        f"flash_attn_3 version={version} (py={module_path}, ext={ext_path}); "
+        f"TORCH_CUDA_ARCH_LIST={env_arch}; torch.cuda.get_arch_list()={torch.cuda.get_arch_list()}"
+    )
+
+
 def run_flash_attn3_smoke_test() -> str:
     device = torch.device("cuda")
     batch, seqlen, nheads, headdim = 1, 16, 2, 64
@@ -102,10 +119,24 @@ def run_flash_attn3_smoke_test() -> str:
     k = torch.randn_like(q)
     v = torch.randn_like(q)
 
-    out, softmax_lse = flash_attn_func(q, k, v, return_attn_probs=True)
-    _ = softmax_lse  # Returned for visibility in case debugging is needed.
-    loss = out.sum()
-    loss.backward()
+    try:
+        out, softmax_lse = flash_attn_func(q, k, v, return_attn_probs=True)
+        _ = softmax_lse  # Returned for visibility in case debugging is needed.
+        loss = out.sum()
+        loss.backward()
+    except Exception as exc:  # noqa: BLE001
+        torch.cuda.synchronize()
+        props = torch.cuda.get_device_properties(device)
+        raise RuntimeError(
+            "FlashAttention-3 forward/backward failed. Diagnostics:\n"
+            f"- Device: {props.name} (cc {props.major}.{props.minor})\n"
+            f"- torch.__version__: {torch.__version__}\n"
+            f"- torch.version.cuda: {torch.version.cuda}\n"
+            f"- TORCH_CUDA_ARCH_LIST: {os.environ.get('TORCH_CUDA_ARCH_LIST', '<unset>')}\n"
+            f"- torch.cuda.get_arch_list(): {torch.cuda.get_arch_list()}\n"
+            f"- flash_attn_3 module: {getattr(importlib.import_module('flash_attn_3'), '__file__', '<not found>')}\n"
+            f"- flash_attn_3._C extension: {getattr(importlib.import_module('flash_attn_3._C'), '__file__', '<not found>')}"
+        ) from exc
 
     max_out = out.abs().max().item()
     max_grad = q.grad.abs().max().item()
@@ -138,6 +169,11 @@ def build_stages() -> List[ValidationStage]:
             runner=ensure_flash_attn3_ops,
         ),
         ValidationStage(
+            name="flash-attn3-build-info",
+            description="Report FlashAttention-3 Python/CUDA artifact locations and arch flags.",
+            runner=describe_flash_attn3_build,
+        ),
+        ValidationStage(
             name="flash-attn3-smoke-test",
             description="Run a minimal FlashAttention-3 forward/backward on CUDA.",
             runner=run_flash_attn3_smoke_test,
@@ -150,6 +186,7 @@ def run_stages(
     *,
     max_stage: int | None,
     stop_on_failure: bool,
+    print_traceback: bool,
 ) -> List[StageResult]:
     results: List[StageResult] = []
     selected = stages if max_stage is None else stages[:max_stage]
@@ -163,6 +200,8 @@ def run_stages(
         except Exception as exc:  # noqa: BLE001
             details = str(exc)
             print(f"  FAIL: {details}")
+            if print_traceback:
+                traceback.print_exc()
             results.append(StageResult(stage.name, False, details))
             if stop_on_failure:
                 break
@@ -199,13 +238,23 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         action="store_true",
         help="Stop after the first failing stage instead of continuing.",
     )
+    parser.add_argument(
+        "--traceback",
+        action="store_true",
+        help="Print full tracebacks for failing stages to aid debugging.",
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: Sequence[str] | None = None) -> None:
     args = parse_args([] if argv is None else argv)
     stages = build_stages()
-    results = run_stages(stages, max_stage=args.max_stage, stop_on_failure=args.stop_on_failure)
+    results = run_stages(
+        stages,
+        max_stage=args.max_stage,
+        stop_on_failure=args.stop_on_failure,
+        print_traceback=args.traceback,
+    )
     summarize_results(results)
 
 
