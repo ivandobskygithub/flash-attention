@@ -25,6 +25,41 @@ import torch
 from torch.utils.cpp_extension import BuildExtension, CppExtension, CUDAExtension, CUDA_HOME
 
 
+from torch.utils.cpp_extension import (
+    IS_HIP_EXTENSION,
+    COMMON_HIP_FLAGS,
+    SUBPROCESS_DECODE_ARGS,
+    IS_WINDOWS,
+    get_cxx_compiler,
+    _join_rocm_home,
+    _join_cuda_home,
+    _is_cuda_file,
+    _maybe_write,
+)
+
+this_dir = os.path.dirname(os.path.abspath(__file__))
+manual_link_path = os.path.join(this_dir, "manual_link.py")
+use_manual_link = os.getenv("FLASH_ATTENTION_USE_MANUAL_LINK", "1") != "0"
+
+if IS_WINDOWS and use_manual_link:
+    _orig_build_extensions = BuildExtension.build_extensions
+
+    def _build_extensions_without_msvc_link(self):
+        original_link_shared_object = getattr(self.compiler, "link_shared_object", None)
+
+        def _run_manual_link(*args, **kwargs):
+            subprocess.check_call([sys.executable, manual_link_path])
+            return None
+
+        self.compiler.link_shared_object = _run_manual_link
+        try:
+            return _orig_build_extensions(self)
+        finally:
+            if original_link_shared_object is not None:
+                self.compiler.link_shared_object = original_link_shared_object
+
+    BuildExtension.build_extensions = _build_extensions_without_msvc_link
+
 # with open("../README.md", "r", encoding="utf-8") as fh:
 with open("../README.md", "r", encoding="utf-8") as fh:
     long_description = fh.read()
