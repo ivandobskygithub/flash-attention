@@ -283,13 +283,15 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     )
     parser.add_argument(
         "--traceback",
-        action="store_true",
-        help="Print full tracebacks for failing stages to aid debugging.",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Print full tracebacks for failing stages to aid debugging (default: on).",
     )
     parser.add_argument(
         "--launch-blocking",
-        action="store_true",
-        help="Force CUDA_LAUNCH_BLOCKING=1 to pin errors to the failing kernel.",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Force CUDA_LAUNCH_BLOCKING=1 to pin errors to the failing kernel (default: on).",
     )
     parser.add_argument(
         "--smoke-seqlen",
@@ -324,10 +326,10 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         "--sync-debug-mode",
         type=int,
         choices=[0, 1, 2],
-        default=None,
+        default=2,
         help=(
             "Set torch.cuda.set_sync_debug_mode for additional CUDA diagnostics (0=off, 1=warn, 2=error). "
-            "Defaults to leaving the current setting untouched."
+            "Defaults to 2 for maximal diagnostics."
         ),
     )
     return parser.parse_args(argv)
@@ -346,6 +348,8 @@ def main(argv: Sequence[str] | None = None) -> None:
     )
     if args.launch_blocking:
         os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
+    else:
+        os.environ.pop("CUDA_LAUNCH_BLOCKING", None)
     if args.sync_debug_mode is not None:
         torch.cuda.set_sync_debug_mode(args.sync_debug_mode)
     stages = build_stages()
