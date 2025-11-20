@@ -28,8 +28,8 @@ DTYPE_MAP_BWD = {
     "bf16": "cutlass::bfloat16_t",
 }
 
-SM = [80, 90]  # Sm kernels support up to
-HEAD_DIMENSIONS = [64, 96, 128, 192, 256]
+SM = [80, 90, 120]  # Sm kernels support up to
+HEAD_DIMENSIONS = [64, 96, 128, 160, 192, 256]
 PAGEDKV = [False, True]
 SPLIT = [False, True]
 SOFTCAP = [False, True]
@@ -95,7 +95,7 @@ class Kernel:
     @property
     def template(self) -> str:
         if self.direction == "fwd":
-            if self.sm == 90:
+            if self.sm >= 90:
                 # Always enable PackGQA for PagedKV or Split to reduce compilation
                 packgqa = self.packgqa or self.paged_kv or self.split
                 return KERNEL_IMPL_TEMPLATE_FWD_SM90.format(
@@ -112,7 +112,7 @@ class Kernel:
                     SOFTCAP=str(self.softcap).lower(), PACKGQA=str(True).lower()
                 )
         elif self.direction == "bwd":
-            if self.sm == 90:
+            if self.sm >= 90:
                 return KERNEL_IMPL_TEMPLATE_BWD_SM90.format(
                     ARCH=str(self.sm), DTYPE=DTYPE_MAP[self.dtype], HEAD_DIM=self.head_dim,
                     SOFTCAP=str(self.softcap).lower()

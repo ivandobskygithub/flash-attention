@@ -28,7 +28,7 @@ Please cite and credit FlashAttention if you use it.
 
 
 ## FlashAttention-3 beta release
-FlashAttention-3 is optimized for Hopper GPUs (e.g. H100). 
+FlashAttention-3 is optimized for Hopper GPUs (e.g. H100) and now includes an experimental SM120 path targeting GeForce Blackwell with Windows + Ninja build support.
 
 Blogpost: https://tridao.me/blog/2024/flash3/
 

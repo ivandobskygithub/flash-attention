@@ -58,6 +58,7 @@ DISABLE_CLUSTER = os.getenv("FLASH_ATTENTION_DISABLE_CLUSTER", "FALSE") == "TRUE
 DISABLE_HDIM64 = os.getenv("FLASH_ATTENTION_DISABLE_HDIM64", "FALSE") == "TRUE"
 DISABLE_HDIM96 = os.getenv("FLASH_ATTENTION_DISABLE_HDIM96", "FALSE") == "TRUE"
 DISABLE_HDIM128 = os.getenv("FLASH_ATTENTION_DISABLE_HDIM128", "FALSE") == "TRUE"
+DISABLE_HDIM160 = os.getenv("FLASH_ATTENTION_DISABLE_HDIM160", "FALSE") == "TRUE"
 DISABLE_HDIM192 = os.getenv("FLASH_ATTENTION_DISABLE_HDIM192", "FALSE") == "TRUE"
 DISABLE_HDIM256 = os.getenv("FLASH_ATTENTION_DISABLE_HDIM256", "FALSE") == "TRUE"
 DISABLE_SM8x = os.getenv("FLASH_ATTENTION_DISABLE_SM80", "FALSE") == "TRUE"
@@ -447,6 +448,8 @@ if not SKIP_CUDA_BUILD:
 
     cc_flag = []
     cc_flag.append("-gencode")
+    cc_flag.append("arch=compute_120,code=sm_120")
+    cc_flag.append("-gencode")
     cc_flag.append("arch=compute_90a,code=sm_90a")
 
     # HACK: The compiler flag -D_GLIBCXX_USE_CXX11_ABI is set to be the same as
@@ -473,6 +476,7 @@ if not SKIP_CUDA_BUILD:
         + (["-DFLASHATTENTION_DISABLE_HDIM64"] if DISABLE_HDIM64 else [])
         + (["-DFLASHATTENTION_DISABLE_HDIM96"] if DISABLE_HDIM96 else [])
         + (["-DFLASHATTENTION_DISABLE_HDIM128"] if DISABLE_HDIM128 else [])
+        + (["-DFLASHATTENTION_DISABLE_HDIM160"] if DISABLE_HDIM160 else [])
         + (["-DFLASHATTENTION_DISABLE_HDIM192"] if DISABLE_HDIM192 else [])
         + (["-DFLASHATTENTION_DISABLE_HDIM256"] if DISABLE_HDIM256 else [])
         + (["-DFLASHATTENTION_DISABLE_SM8x"] if DISABLE_SM8x else [])
@@ -490,6 +494,7 @@ if not SKIP_CUDA_BUILD:
         + ([64] if not DISABLE_HDIM64 else [])
         + ([96] if not DISABLE_HDIM96 else [])
         + ([128] if not DISABLE_HDIM128 else [])
+        + ([160] if not DISABLE_HDIM160 else [])
         + ([192] if not DISABLE_HDIM192 else [])
         + ([256] if not DISABLE_HDIM256 else [])
     )

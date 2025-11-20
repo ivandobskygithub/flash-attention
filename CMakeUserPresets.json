@@ -1,0 +1,20 @@
+{
+  "version": 5,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 24,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "windows-ninja",
+      "displayName": "Windows Ninja",
+      "generator": "Ninja",
+      "binaryDir": "out/build/windows-ninja",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_CUDA_ARCHITECTURES": "120;90"
+      }
+    }
+  ]
+}
