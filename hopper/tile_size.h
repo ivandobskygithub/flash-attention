@@ -34,7 +34,13 @@ constexpr std::tuple<int, int, bool, bool> tile_size_fwd_sm90(
             // {128, 192, true, false} and {192, 128, false, true} are quite good too
             // 128 x 192 hits the limit of smem if MmaPV_is_RS, 128 x 144 hits the limit if !MmaPV_is_RS
         } else if (headdim <= 192) {
-            return {128, paged_kv_non_TMA || is_local ? 96 : (headdim_v <= 128 ? 128 : 112), true, true};  // 128 x 112 hits the limit of smem
+            // The 128x128 / 128x112 tiles exceed the ~100KB shared memory limit of consumer GPUs (for example, when running on
+            // devices without the larger H100 shared memory carve‑out). Use a smaller BlockM to keep the smem footprint under
+            // the per-block cap while still preferring the larger BlockN when possible.
+            bool const smem_constrained = headdim_v <= 128 && !is_local && !paged_kv_non_TMA;
+            int const block_m = smem_constrained ? 64 : 128;
+            int const block_n = paged_kv_non_TMA || is_local ? 96 : (headdim_v <= 128 ? 128 : 112);
+            return {block_m, block_n, true, true};
         } else {
             return {128, is_local ? 64 : 80, true, true};  // 128 x 80 hits the limit of smem
         }
