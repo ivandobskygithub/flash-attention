@@ -16,9 +16,10 @@ constexpr std::tuple<int, int, bool, bool> tile_size_fwd_sm90(
             // With this workaround in Cutlass 3.8, tile size 192 x 128 got slower for non-causal, idk why
             // https://github.com/NVIDIA/cutlass/blob/833f6990e031b48b4cd2fcf55e0849c51ef6bac2/include/cute/container/tuple.hpp#L131
             if (headdim_v == 512) {
+                // Keep the tile narrow to avoid blowing past the consumer shared-memory budget when values are very wide.
                 return {64, 64, false, false};
             } else if (headdim_v == 256) {
-                return {128, 96, true, false};
+                return {64, 80, true, true};
             } else {
                 // Switch to tile size 192 x 192 for now
                 bool const use_blockN_128 = is_causal || is_local || paged_kv_non_TMA;
@@ -27,16 +28,28 @@ constexpr std::tuple<int, int, bool, bool> tile_size_fwd_sm90(
             // Good for long seqlen (>= 4k) but suffers from tile quantization at short seqlen
             // return {192, is_causal || is_local ? 192 : 176, true, false};
         } else if (headdim <= 96) {
-            return {192, is_local || paged_kv_non_TMA ? 128 : 144, false, true};
+            // Large value dimensions inflate smem usage even at modest head sizes, so bias toward smaller tiles for dv >= 256.
+            int const block_n = headdim_v >= 256 ? 96 : (is_local || paged_kv_non_TMA ? 128 : 144);
+            return {block_n == 96 ? 128 : 192, block_n, false, true};
         } else if (headdim <= 128) {
-            bool const use_blockN_128 = is_causal || is_local || paged_kv_non_TMA;
-            return {128, use_blockN_128 ? 128 : 176, true, true};
+            // Shared memory on consumer parts tops out at ~100KB, so prefer a BlockM=64 path that stays under that limit while
+            // keeping BlockN as large as possible for throughput.
+            int const block_n = paged_kv_non_TMA || is_local ? 80 : (headdim_v <= 128 ? 96 : 80);
+            return {64, block_n, true, true};
             // {128, 192, true, false} and {192, 128, false, true} are quite good too
             // 128 x 192 hits the limit of smem if MmaPV_is_RS, 128 x 144 hits the limit if !MmaPV_is_RS
         } else if (headdim <= 192) {
-            return {128, paged_kv_non_TMA || is_local ? 96 : (headdim_v <= 128 ? 128 : 112), true, true};  // 128 x 112 hits the limit of smem
+            // The 128x128 / 128x112 tiles exceed the ~100KB shared memory limit of consumer GPUs (for example, when running on
+            // devices without the larger H100 shared memory carve‑out). Use smaller tiles for all value dims to guarantee we
+            // stay below the per-block cap across head dimensions up to 192.
+            int const block_n = paged_kv_non_TMA || is_local ? 64 : (headdim <= 160 ? 80 : 64);
+            return {64, block_n, true, true};
         } else {
-            return {128, is_local ? 64 : 80, true, true};  // 128 x 80 hits the limit of smem
+            // For head dims above 192 the shared-memory footprint grows quickly with BlockM, so stick to 64xN tiles even though
+            // they are smaller than the H100-optimized 128xN shapes. Favor narrower BlockN when value dims are large to stay
+            // under the ~100KB cap on consumer GPUs.
+            int const block_n = paged_kv_non_TMA || is_local ? 48 : (headdim <= 256 ? 64 : 48);
+            return {64, block_n, true, true};
         }
     } else {
         if (headdim <= 64) {
