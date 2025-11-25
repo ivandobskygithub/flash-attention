@@ -58,7 +58,10 @@ void run_flash_fwd(Flash_fwd_params &params, cudaStream_t stream) {
     static constexpr bool MmaPV_is_RS = std::get<2>(kBlockMN_RS_IntraWGOverlap);
     static constexpr bool IntraWGOverlap = std::get<3>(kBlockMN_RS_IntraWGOverlap);
     static constexpr int kNWarps = std::get<2>(kBlockMN_kNWarps_Stages_RS);
-    static constexpr int kStages = Arch >= 90 ? 2 : std::get<3>(kBlockMN_kNWarps_Stages_RS);
+    // Consumer Blackwell parts expose ~100KB of shared memory, so reduce the forward pipeline depth
+    // to keep the shared memory footprint under the device limit while retaining the SM90 depth on
+    // H100-class GPUs.
+    static constexpr int kStages = Arch >= 120 ? 1 : (Arch >= 90 ? 2 : std::get<3>(kBlockMN_kNWarps_Stages_RS));
     static constexpr bool Q_in_regs = Arch >= 90 ? false : std::get<4>(kBlockMN_kNWarps_Stages_RS);
 
     using TileShape_MNK = cute::Shape<Int<kBlockM>, Int<kBlockN>, Int<kHeadDim>>;
@@ -190,7 +193,10 @@ void run_flash_fwd(Flash_fwd_params &params, cudaStream_t stream) {
 
     dim3 grid_dims = AttnKernel::get_grid_shape(kernel_params);
     dim3 block_dims = AttnKernel::get_block_shape();
-    int smem_size = AttnKernel::SharedStorageSize;
+    static constexpr int kSmemSize = AttnKernel::SharedStorageSize;
+    static_assert(Arch < 120 || kSmemSize <= 101376,
+                  "SM120 forward kernel requires more shared memory than the consumer budget; reduce tile sizes.");
+    int smem_size = kSmemSize;
     int max_threads_per_block = 0;
     int smem_limit_optin = 0;
     int smem_limit = 0;
