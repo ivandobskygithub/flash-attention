@@ -8,9 +8,9 @@
 
 constexpr int smem_estimate_bytes(int block_m, int block_n, int headdim, int headdim_v, int element_size) {
     // Double-buffer the residency for Q/K/V and the accumulators when the head/value dims are modest.
-    // For very large dimensions the single-stage SM120 pipeline only needs a single residency footprint, so
-    // avoid over-clamping by scaling the estimate down to one buffer in that regime.
-    int const buffering = (headdim + headdim_v >= 512) ? 1 : 2;
+    // Value dimensions 256+ already drive the shared-memory footprint high, so treat them like the large
+    // combined-head/value case and drop to a single buffer in that regime to avoid over-clamping.
+    int const buffering = (headdim_v >= 256 || headdim + headdim_v >= 512) ? 1 : 2;
     return buffering * (block_m + block_n) * (headdim + headdim_v) * element_size;
 }
 
