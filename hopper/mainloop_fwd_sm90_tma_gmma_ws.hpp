@@ -119,6 +119,7 @@ struct CollectiveMainloopFwdSm90 {
     static constexpr int NumMmaThreadsQK = size(TiledMmaQK{});
     static constexpr int NumMmaThreads = size(TiledMmaPV{});
     static constexpr int NumProducerThreads = !Transpose_V && Use_TMA_KV && Use_TMA_Q ? cutlass::NumThreadsPerWarp : cutlass::NumThreadsPerWarpGroup;
+    static constexpr bool SingleProducerWarp = NumProducerThreads == cutlass::NumThreadsPerWarp;
     static_assert(NumMmaThreadsQK % cutlass::NumThreadsPerWarpGroup == 0);
     static_assert(NumMmaThreads % cutlass::NumThreadsPerWarpGroup == 0);
     static constexpr int NumMmaWarpGroups = NumMmaThreads / cutlass::NumThreadsPerWarpGroup;
@@ -646,11 +647,11 @@ struct CollectiveMainloopFwdSm90 {
         }
     }
 
-    template <typename SharedStorage>
+    template <typename SharedStorage, typename TensorQ, typename TensorQv>
     CUTLASS_DEVICE void load_q_impl(
         std::true_type /*UseTmaQ*/, Params const& params, SharedStorage &shared_storage,
         SeqlenInfo_t const& seqlen_info, cute::tuple<int32_t, int32_t, int32_t, int32_t> block_coord,
-        int thread_idx, bool is_varlen_q, int warp_idx_in_warpgroup, Tensor sQ, Tensor sQv) {
+        int thread_idx, bool is_varlen_q, int warp_idx_in_warpgroup, TensorQ sQ, TensorQv sQv) {
 
         int const m_block = get<0>(block_coord);
         int const bidh = get<1>(block_coord);
@@ -694,11 +695,11 @@ struct CollectiveMainloopFwdSm90 {
         }
     }
 
-    template <typename SharedStorage>
+    template <typename SharedStorage, typename TensorQ, typename TensorQv>
     CUTLASS_DEVICE void load_q_impl(
         std::false_type /*UseTmaQ*/, Params const& params, SharedStorage &shared_storage,
         SeqlenInfo_t const& seqlen_info, cute::tuple<int32_t, int32_t, int32_t, int32_t> block_coord,
-        int thread_idx, bool is_varlen_q, int /*warp_idx_in_warpgroup*/, Tensor sQ, Tensor sQv) {
+        int thread_idx, bool is_varlen_q, int /*warp_idx_in_warpgroup*/, TensorQ sQ, TensorQv sQv) {
 
         int const m_block = get<0>(block_coord);
         int const bidh = get<1>(block_coord);
