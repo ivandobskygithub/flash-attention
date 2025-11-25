@@ -52,8 +52,9 @@ def _load_bridge() -> ctypes.CDLL:
 
 
 def estimate_smem_bytes(block_m: int, block_n: int, headdim: int, headdim_v: int, element_size: int) -> int:
-    # Mirror the double-buffer estimate used in hopper/tile_size.h.
-    return 2 * (block_m + block_n) * (headdim + headdim_v) * element_size
+    # Mirror the buffering-aware estimate used in hopper/tile_size.h.
+    buffering = 1 if headdim + headdim_v >= 512 else 2
+    return buffering * (block_m + block_n) * (headdim + headdim_v) * element_size
 
 
 def test_tile_sizes_stay_within_blackwell_smem_budget():
