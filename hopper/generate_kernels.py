@@ -28,8 +28,8 @@ DTYPE_MAP_BWD = {
     "bf16": "cutlass::bfloat16_t",
 }
 
-SM = [80, 90, 120]  # Sm kernels support up to
-HEAD_DIMENSIONS = [64, 96, 128, 160, 192, 256]
+SM = [90,120]  # Sm kernels support up to
+HEAD_DIMENSIONS = [64, 96, 128, 160, 192, 256] #
 PAGEDKV = [False, True]
 SPLIT = [False, True]
 SOFTCAP = [False, True]
